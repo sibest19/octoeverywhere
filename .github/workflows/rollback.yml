@@ -4,9 +4,8 @@ on:
   workflow_dispatch:
     inputs:
       rollback_to:
-        description: 'Tag to rollback to (e.g., stable-backup, v1.2.3)'
+        description: 'Tag to rollback to (e.g., v1.2.3)'
         required: true
-        default: 'stable-backup'
       reason:
         description: 'Reason for rollback'
         required: true
@@ -80,7 +79,7 @@ jobs:
               
               ## Available Backup Tags
               - \`pre-rollback-backup\` - Version that was rolled back from
-              - \`stable-backup\` - Previous stable version
+              - \`v<version>\` - Version-specific tags
               `,
               labels: ['rollback', 'urgent']
             })

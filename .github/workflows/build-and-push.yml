@@ -147,18 +147,6 @@ jobs:
       - name: Pull candidate image
         run: docker pull ghcr.io/${{ github.repository_owner }}/octoeverywhere:candidate
         
-      - name: Backup current stable version
-        run: |
-          # Tag current latest as stable backup before promoting new version
-          if docker pull ghcr.io/${{ github.repository_owner }}/octoeverywhere:latest 2>/dev/null; then
-            docker tag ghcr.io/${{ github.repository_owner }}/octoeverywhere:latest \
-              ghcr.io/${{ github.repository_owner }}/octoeverywhere:stable-backup
-            docker push ghcr.io/${{ github.repository_owner }}/octoeverywhere:stable-backup
-            echo "Backed up current version as stable-backup"
-          else
-            echo "No existing latest version to backup"
-          fi
-        
       - name: Promote candidate to latest
         run: |
           # Re-tag and push the tested candidate as latest and version-specific
@@ -166,12 +154,9 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/octoeverywhere:latest
           docker tag ghcr.io/${{ github.repository_owner }}/octoeverywhere:candidate \
             ghcr.io/${{ github.repository_owner }}/octoeverywhere:${{ needs.check-upstream.outputs.upstream-tag }}
-          docker tag ghcr.io/${{ github.repository_owner }}/octoeverywhere:candidate \
-            ghcr.io/${{ github.repository_owner }}/octoeverywhere:stable
             
           docker push ghcr.io/${{ github.repository_owner }}/octoeverywhere:latest
           docker push ghcr.io/${{ github.repository_owner }}/octoeverywhere:${{ needs.check-upstream.outputs.upstream-tag }}
-          docker push ghcr.io/${{ github.repository_owner }}/octoeverywhere:stable
 
   notify-failure:
     needs: [check-upstream, build, test]

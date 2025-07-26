@@ -78,19 +78,16 @@ GitHub Actions automatically:
 - Checks daily for upstream image updates
 - **Detects significant changes** (entrypoint/command modifications) and alerts
 - **Tests images before promotion** using comprehensive test suite
-- **Maintains backup tags** (`stable-backup`) for emergency rollbacks
 - Only rebuilds when upstream changes to avoid unnecessary churn
 - Publishes to `ghcr.io/sibest19/octoeverywhere` with multiple tags:
   - `latest` - Current stable version (tested)
-  - `stable` - Alias for latest stable
-  - `stable-backup` - Previous stable version  
   - `v<version>` - Version-specific tags
 
 ### Resilience Features
 
 - **Pre-deployment testing**: All images are tested before being tagged as `latest`
 - **Change detection**: Alerts when upstream makes significant changes that might break compatibility
-- **Emergency rollback**: Manual workflow to quickly revert to previous stable version
+- **Emergency rollback**: Manual workflow to quickly revert to previous version
 - **Health monitoring**: Standalone script for continuous monitoring (`health-check.sh`)
 
 ## Troubleshooting
@@ -99,15 +96,15 @@ GitHub Actions automatically:
 
 If the latest version has issues, you can quickly rollback:
 
-1. **Use stable backup tag:**
+1. **Use a specific version tag:**
    ```bash
-   docker pull ghcr.io/sibest19/octoeverywhere:stable-backup
-   docker tag ghcr.io/sibest19/octoeverywhere:stable-backup ghcr.io/sibest19/octoeverywhere:latest
+   docker pull ghcr.io/sibest19/octoeverywhere:v<version>
+   docker tag ghcr.io/sibest19/octoeverywhere:v<version> ghcr.io/sibest19/octoeverywhere:latest
    ```
 
 2. **Trigger automated rollback:**
    - Go to Actions → Emergency Rollback → Run workflow
-   - Select the target tag (e.g., `stable-backup`) 
+   - Select the target tag (e.g., `v1.2.3`) 
    - Provide a reason for the rollback
 
 ### Health Monitoring
