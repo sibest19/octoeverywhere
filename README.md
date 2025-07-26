@@ -2,20 +2,21 @@
 
 [![Build and Push to GHCR](https://github.com/sibest19/octoeverywhere/actions/workflows/build-and-push.yml/badge.svg)](https://github.com/sibest19/octoeverywhere/actions/workflows/build-and-push.yml)
 [![GitHub Container Registry](https://img.shields.io/badge/ghcr.io-sibest19%2Foctoeverywhere-blue?logo=docker)](https://github.com/sibest19/octoeverywhere/pkgs/container/octoeverywhere)
-[![Docker Pulls](https://img.shields.io/badge/dynamic/json?color=blue&label=pulls&query=$.download_count&url=https%3A%2F%2Fghcr.io%2Fv2%2Fsibest19%2Foctoeverywhere%2Fblobs%2Fsha256%3Amanifest&logo=docker)](https://github.com/sibest19/octoeverywhere/pkgs/container/octoeverywhere)
 
-A minimal Docker wrapper for the official `octoeverywhere/octoeverywhere` image that adds dynamic user/group ID support to fix host file permission issues.
+A Docker wrapper that fixes file permission issues with the official [OctoEverywhere](https://octoeverywhere.com) image by allowing you to set your own user/group IDs.
 
-## Problem
+> **What is OctoEverywhere?** A service that provides remote access, AI failure detection, and notifications for 3D printers.
 
-The official OctoEverywhere image runs as UID 1001/GID 0, causing permission issues when mounting host directories owned by different users.
+## The Problem
 
-## Solution
+The official OctoEverywhere image runs as UID 1001, which creates permission conflicts when you mount host directories owned by your user (typically UID 1000).
 
-* Set any `PUID`/`PGID` at runtime - no image rebuilds needed
-* Automatic ownership fix for `/data` directory on startup
-* Zero maintenance - uses official image as base
-* Auto-rebuilds when upstream updates
+## The Solution
+
+* **Runtime user mapping**: Set `PUID`/`PGID` to match your host user
+* **Automatic permissions**: Fixes `/data` directory ownership on startup  
+* **Zero maintenance**: Stays updated with official releases automatically
+* **Drop-in replacement**: Same usage as official image, just add PUID/PGID
 
 ## Repository Structure
 
@@ -23,12 +24,21 @@ The official OctoEverywhere image runs as UID 1001/GID 0, causing permission iss
 sibest19/octoeverywhere/
 ├── Dockerfile               # Extends the official image and installs su-exec
 ├── entrypoint.sh            # Privilege-dropping wrapper script
+├── health-check.sh          # Health monitoring script with alerts
+├── test-wrapper.sh          # Comprehensive test suite
 └── .github/
     └── workflows/
-        └── build-and-push.yml  # GH Actions workflow for CI/CD
+        ├── build-and-push.yml  # CI/CD pipeline for automated builds
+        ├── rollback.yml        # Emergency rollback workflow
+        └── health-check.yml    # Automated health monitoring
 ```
 
-## Quick Start
+## Usage
+
+**Get your user/group IDs first:**
+```bash
+echo "PUID=$(id -u) PGID=$(id -g)"
+```
 
 **Docker Compose:**
 ```yaml
@@ -36,9 +46,9 @@ services:
   octoeverywhere:
     image: ghcr.io/sibest19/octoeverywhere:latest
     environment:
-      - PUID=1000                   # Your user ID (run `id -u`)
-      - PGID=1000                   # Your group ID (run `id -g`)
-      - COMPANION_MODE=elegoo
+      - PUID=1000                   # Replace with your user ID
+      - PGID=1000                   # Replace with your group ID
+      - COMPANION_MODE=elegoo       # Your printer type
       - PRINTER_IP=192.168.1.100    # Your printer's IP
     volumes:
       - ./data:/data
@@ -57,20 +67,19 @@ docker run -d \
 
 ## Environment Variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PUID` | `1001` | User ID to run as |
-| `PGID` | `0` | Group ID to run as |
-| `COMPANION_MODE` | - | OctoEverywhere mode (e.g., `elegoo`) |
-| `PRINTER_IP` | - | Your printer's IP address |
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `PUID` | Your user ID (run `id -u`) | `1000` |
+| `PGID` | Your group ID (run `id -g`) | `1000` |
+| `COMPANION_MODE` | Printer type | `elegoo`, `bambu` |
+| `PRINTER_IP` | Printer's network address | `192.168.1.100` |
 
 ## How It Works
 
-This wrapper:
-1. **At build time**: Inspects the upstream image to extract its entrypoint and command
-2. **At runtime**: Creates user/group with your PUID/PGID, fixes `/data` ownership, then runs the original command as that user
+1. **Build time**: Extracts the official image's startup command
+2. **Runtime**: Creates a user with your PUID/PGID, fixes `/data` ownership, then runs the original command as that user
 
-The wrapper automatically adapts to upstream changes without manual updates.
+This approach automatically adapts to upstream changes.
 
 ## Automated Builds
 
@@ -90,22 +99,17 @@ GitHub Actions automatically:
 - **Emergency rollback**: Manual workflow to quickly revert to previous version
 - **Health monitoring**: Standalone script for continuous monitoring (`health-check.sh`)
 
-## Troubleshooting
+## Emergency Rollback
 
-### Emergency Rollback
+If something breaks, quickly revert to a previous version:
 
-If the latest version has issues, you can quickly rollback:
+**Option 1: Use a specific version**
+```bash
+docker pull ghcr.io/sibest19/octoeverywhere:v1.2.3
+```
 
-1. **Use a specific version tag:**
-   ```bash
-   docker pull ghcr.io/sibest19/octoeverywhere:v<version>
-   docker tag ghcr.io/sibest19/octoeverywhere:v<version> ghcr.io/sibest19/octoeverywhere:latest
-   ```
-
-2. **Trigger automated rollback:**
-   - Go to Actions → Emergency Rollback → Run workflow
-   - Select the target tag (e.g., `v1.2.3`) 
-   - Provide a reason for the rollback
+**Option 2: Automated rollback**
+Go to Actions → Emergency Rollback → Run workflow, then select the target version.
 
 ### Health Monitoring
 
@@ -116,8 +120,8 @@ Run the included health check script:
 
 Set environment variables for alerts:
 ```bash
-export SLACK_WEBHOOK="https://hooks.slack.com/..."
-export ALERT_EMAIL="admin@example.com"
+export TELEGRAM_BOT_TOKEN="your_bot_token"
+export TELEGRAM_CHAT_ID="your_chat_id"
 ./health-check.sh
 ```
 
