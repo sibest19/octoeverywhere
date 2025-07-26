@@ -1,5 +1,9 @@
 # OctoEverywhere Non-Root Wrapper Image
 
+[![Build and Push to GHCR](https://github.com/sibest19/octoeverywhere/actions/workflows/build-and-push.yml/badge.svg)](https://github.com/sibest19/octoeverywhere/actions/workflows/build-and-push.yml)
+[![GitHub Container Registry](https://img.shields.io/badge/ghcr.io-sibest19%2Foctoeverywhere-blue?logo=docker)](https://github.com/sibest19/octoeverywhere/pkgs/container/octoeverywhere)
+[![Docker Pulls](https://img.shields.io/badge/dynamic/json?color=blue&label=pulls&query=$.download_count&url=https%3A%2F%2Fghcr.io%2Fv2%2Fsibest19%2Foctoeverywhere%2Fblobs%2Fsha256%3Amanifest&logo=docker)](https://github.com/sibest19/octoeverywhere/pkgs/container/octoeverywhere)
+
 This repository provides a minimal Docker wrapper around the official `octoeverywhere/octoeverywhere` image, adding dynamic user and group ID (PUID/PGID) support and automated builds via GitHub Actions. The goal is to allow running OctoEverywhere with the correct host-side file permissions without modifying the upstream image.
 
 ## Motivation

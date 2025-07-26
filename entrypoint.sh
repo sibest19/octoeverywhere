@@ -6,7 +6,24 @@ PGID=${PGID:-0}
 
 echo "[INFO] Running as root. Dropping to UID=${PUID}, GID=${PGID}"
 
-# Fix ownership of /data if needed
+# Create group if it doesn't exist
+if ! getent group $PGID >/dev/null 2>&1; then
+    echo "[INFO] Creating group with GID=${PGID}"
+    addgroup -g $PGID appgroup
+else
+    echo "[INFO] Group with GID=${PGID} already exists"
+fi
+
+# Create user if it doesn't exist
+if ! getent passwd $PUID >/dev/null 2>&1; then
+    echo "[INFO] Creating user with UID=${PUID}"
+    adduser -D -H -u $PUID -G $(getent group $PGID | cut -d: -f1) appuser
+else
+    echo "[INFO] User with UID=${PUID} already exists"
+fi
+
+# Fix ownership of /data directory
+echo "[INFO] Setting ownership of /data to ${PUID}:${PGID}"
 chown -R "${PUID}:${PGID}" /data
 
 # Load the upstream configuration discovered during build
