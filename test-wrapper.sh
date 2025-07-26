@@ -13,9 +13,11 @@ cleanup() {
     docker stop test-octo 2>/dev/null || true
     docker rm test-octo 2>/dev/null || true
     
-    # Try to remove test directory, use sudo if needed for root-owned files
+    # Clean up test directory with better error handling
     if [ -d "$TEST_DIR" ]; then
-        rm -rf "$TEST_DIR" 2>/dev/null || sudo rm -rf "$TEST_DIR" 2>/dev/null || true
+        rm -rf "$TEST_DIR" 2>/dev/null || sudo rm -rf "$TEST_DIR" 2>/dev/null || {
+            log "Warning: Could not remove test directory $TEST_DIR"
+        }
     fi
 }
 trap cleanup EXIT
@@ -27,11 +29,11 @@ log() {
 test_basic_functionality() {
     log "Testing basic functionality..."
     
-    # Test that the image can start and basic tools are present
+    # Test that the image can start and basic tools are present - use tmpfs for consistency
     docker run --rm \
         -e PUID=1000 \
         -e PGID=1000 \
-        -v "$TEST_DIR:/data" \
+        --tmpfs /data \
         --entrypoint="" \
         "$IMAGE_TAG" \
         sh -c "
@@ -117,7 +119,7 @@ test_upstream_config() {
 test_container_startup() {
     log "Testing full container startup (5 second timeout)..."
     
-    # Test that the container can start without immediate crashes
+    # Test that the container can start without immediate crashes - use tmpfs for consistency
     docker run -d \
         --name test-octo \
         -e PUID=1000 \
@@ -126,7 +128,7 @@ test_container_startup() {
         -e SERIAL_NUMBER=test \
         -e ACCESS_CODE=test \
         -e PRINTER_IP=127.0.0.1 \
-        -v "$TEST_DIR:/data" \
+        --tmpfs /data \
         "$IMAGE_TAG" || { log "Container startup test: FAILED"; ((FAILED_TESTS++)); return; }
     
     # Wait a moment and check if container is still running

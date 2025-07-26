@@ -53,13 +53,11 @@ check_image_availability() {
 
 check_basic_functionality() {
     echo "Checking basic functionality..."
-    local temp_dir=$(mktemp -d)
-    trap "rm -rf $temp_dir" RETURN
     
     if ! docker run --rm \
         -e PUID=1000 \
         -e PGID=1000 \
-        -v "$temp_dir:/data" \
+        --tmpfs /data \
         --entrypoint="" \
         "$IMAGE" \
         sh -c "test -x /entrypoint.sh && which su-exec && which jq && test -f /upstream_config" >/dev/null 2>&1; then
@@ -102,11 +100,10 @@ check_upstream_changes() {
 
 check_container_startup() {
     echo "Checking container startup..."
-    local temp_dir=$(mktemp -d)
     local container_name="health-check-$$"
-    trap "docker stop $container_name 2>/dev/null || true; docker rm $container_name 2>/dev/null || true; rm -rf $temp_dir" RETURN
+    trap "docker stop '$container_name' 2>/dev/null || true; docker rm '$container_name' 2>/dev/null || true" RETURN
     
-    # Start container in background
+    # Start container in background - use tmpfs instead of bind mount to avoid permission issues
     if ! docker run -d \
         --name "$container_name" \
         -e PUID=1000 \
@@ -115,7 +112,7 @@ check_container_startup() {
         -e SERIAL_NUMBER=test \
         -e ACCESS_CODE=test \
         -e PRINTER_IP=127.0.0.1 \
-        -v "$temp_dir:/data" \
+        --tmpfs /data \
         "$IMAGE" >/dev/null 2>&1; then
         
         send_alert "Failed to start container for health check" "ERROR"  
