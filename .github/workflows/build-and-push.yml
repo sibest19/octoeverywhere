@@ -1,12 +1,10 @@
 name: Build and Push to GHCR
-
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   schedule:
     - cron: '0 6 * * *'
   workflow_dispatch:
-
 jobs:
   check-upstream:
     runs-on: ubuntu-latest
@@ -23,26 +21,26 @@ jobs:
         run: |
           # Pull the upstream image to inspect it
           docker pull octoeverywhere/octoeverywhere:latest
-          
+
           # Get current upstream image digest
           UPSTREAM_DIGEST=$(docker image inspect octoeverywhere/octoeverywhere:latest --format='{{index .RepoDigests 0}}' | cut -d'@' -f2)
           echo "upstream-digest=$UPSTREAM_DIGEST" >> $GITHUB_OUTPUT
-          
+
           # Extract upstream entrypoint and cmd
           UPSTREAM_ENTRYPOINT=$(docker image inspect octoeverywhere/octoeverywhere:latest --format='{{json .Config.Entrypoint}}')
           UPSTREAM_CMD=$(docker image inspect octoeverywhere/octoeverywhere:latest --format='{{json .Config.Cmd}}')
           echo "upstream-entrypoint=$UPSTREAM_ENTRYPOINT" >> $GITHUB_OUTPUT
           echo "upstream-cmd=$UPSTREAM_CMD" >> $GITHUB_OUTPUT
-          
+
           # Extract upstream version/tag if available
           UPSTREAM_TAG=$(docker image inspect octoeverywhere/octoeverywhere:latest --format='{{index .Config.Labels "org.opencontainers.image.version"}}' 2>/dev/null || echo "latest")
           echo "upstream-tag=$UPSTREAM_TAG" >> $GITHUB_OUTPUT
-          
+
           # Check if we have this digest already
           EXISTING_DIGEST=$(docker manifest inspect ghcr.io/${{ github.repository_owner }}/octoeverywhere:latest 2>/dev/null | jq -r '.annotations."upstream.digest" // empty' || echo "")
           EXISTING_ENTRYPOINT=$(docker manifest inspect ghcr.io/${{ github.repository_owner }}/octoeverywhere:latest 2>/dev/null | jq -r '.annotations."upstream.entrypoint" // empty' || echo "")
           EXISTING_CMD=$(docker manifest inspect ghcr.io/${{ github.repository_owner }}/octoeverywhere:latest 2>/dev/null | jq -r '.annotations."upstream.cmd" // empty' || echo "")
-          
+
           # Check for significant changes that might break our wrapper
           SIGNIFICANT_CHANGE="false"
           if [ "$UPSTREAM_ENTRYPOINT" != "$EXISTING_ENTRYPOINT" ] || [ "$UPSTREAM_CMD" != "$EXISTING_CMD" ]; then
@@ -52,7 +50,7 @@ jobs:
             SIGNIFICANT_CHANGE="true"
           fi
           echo "significant-change=$SIGNIFICANT_CHANGE" >> $GITHUB_OUTPUT
-          
+
           if [ "$UPSTREAM_DIGEST" != "$EXISTING_DIGEST" ] || [ "${{ github.event_name }}" = "push" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "should-build=true" >> $GITHUB_OUTPUT
             echo "Upstream image has been updated or manual trigger detected"
@@ -62,37 +60,31 @@ jobs:
             echo "should-build=false" >> $GITHUB_OUTPUT
             echo "No upstream changes detected"
           fi
-
   build:
     needs: check-upstream
     if: needs.check-upstream.outputs.should-build == 'true'
     runs-on: ubuntu-latest
-
     permissions:
       contents: read
       packages: write
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
       - name: Build and push
         id: build
         uses: docker/build-push-action@v5
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: true   # Push candidate so other jobs can use it
+          push: true # Push candidate so other jobs can use it
           build-args: |
             UPSTREAM_ENTRYPOINT=${{ needs.check-upstream.outputs.upstream-entrypoint }}
             UPSTREAM_CMD=${{ needs.check-upstream.outputs.upstream-cmd }}
@@ -105,7 +97,6 @@ jobs:
             upstream.entrypoint=${{ needs.check-upstream.outputs.upstream-entrypoint }}
             upstream.cmd=${{ needs.check-upstream.outputs.upstream-cmd }}
             build.date=${{ github.run_id }}
-
   test:
     needs: [check-upstream, build]
     if: needs.check-upstream.outputs.should-build == 'true'
@@ -113,22 +104,18 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Pull candidate image for testing
         run: |
           docker pull ghcr.io/${{ github.repository_owner }}/octoeverywhere:candidate
-        
       - name: Run comprehensive tests
         run: |
           ./test-wrapper.sh ghcr.io/${{ github.repository_owner }}/octoeverywhere:candidate
-
   promote:
     needs: [check-upstream, build, test]
     if: needs.check-upstream.outputs.should-build == 'true'
@@ -143,21 +130,10 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-          
       - name: Pull candidate image
         run: docker pull ghcr.io/${{ github.repository_owner }}/octoeverywhere:candidate
-        
       - name: Promote candidate to latest
-        run: |
-          # Re-tag and push the tested candidate as latest and version-specific
-          docker tag ghcr.io/${{ github.repository_owner }}/octoeverywhere:candidate \
-            ghcr.io/${{ github.repository_owner }}/octoeverywhere:latest
-          docker tag ghcr.io/${{ github.repository_owner }}/octoeverywhere:candidate \
-            ghcr.io/${{ github.repository_owner }}/octoeverywhere:${{ needs.check-upstream.outputs.upstream-tag }}
-            
-          docker push ghcr.io/${{ github.repository_owner }}/octoeverywhere:latest
-          docker push ghcr.io/${{ github.repository_owner }}/octoeverywhere:${{ needs.check-upstream.outputs.upstream-tag }}
-
+        run: "# Re-tag and push the tested candidate as latest and version-specific\ndocker tag ghcr.io/${{ github.repository_owner }}/octoeverywhere:candidate \\\n  ghcr.io/${{ github.repository_owner }}/octoeverywhere:latest\ndocker tag ghcr.io/${{ github.repository_owner }}/octoeverywhere:candidate \\\n  ghcr.io/${{ github.repository_owner }}/octoeverywhere:${{ needs.check-upstream.outputs.upstream-tag }}\n  \ndocker push ghcr.io/${{ github.repository_owner }}/octoeverywhere:latest\ndocker push ghcr.io/${{ github.repository_owner }}/octoeverywhere:${{ needs.check-upstream.outputs.upstream-tag }}\n"
   notify-failure:
     needs: [check-upstream, build, test]
     if: failure() && needs.check-upstream.outputs.should-build == 'true'

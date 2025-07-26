@@ -1,0 +1,44 @@
+# Lefthook configuration for automatic formatting
+# https://github.com/evilmartians/lefthook
+pre-commit:
+  parallel: true
+  commands:
+    # Format shell scripts
+    format-shell:
+      glob: "*.sh"
+      run: |
+        if command -v shfmt &>/dev/null; then
+          echo "🔧 Formatting shell scripts..."
+          shfmt -w -i 2 {staged_files}
+          git add {staged_files}
+        else
+          echo "⚠️  shfmt not found, skipping shell script formatting"
+        fi
+    # Format YAML files
+    format-yaml:
+      glob: "*.{yml,yaml}"
+      run: |
+        if command -v yamlfmt &>/dev/null; then
+          echo "🔧 Formatting YAML files..."
+          yamlfmt {staged_files}
+          git add {staged_files}
+        else
+          echo "⚠️  yamlfmt not found, skipping YAML formatting"
+        fi
+    # Lint Dockerfiles
+    lint-dockerfile:
+      glob: "Dockerfile*"
+      run: |
+        if command -v hadolint &>/dev/null; then
+          echo "🔍 Linting Dockerfiles..."
+          hadolint {staged_files}
+        else
+          echo "⚠️  hadolint not found, skipping Dockerfile linting"
+        fi
+# Optional: Run formatting on pre-push as well
+pre-push:
+  commands:
+    format-check:
+      run: |
+        echo "🔍 Running full format check before push..."
+        ./format.sh

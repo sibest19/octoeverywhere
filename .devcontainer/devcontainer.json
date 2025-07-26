@@ -22,6 +22,8 @@
 	"remoteEnv": {
 		"LOCAL_WORKSPACE_FOLDER": "${localWorkspaceFolder}"
 	},
+	// Install formatting tools after container creation
+	"postCreateCommand": "bash -c 'curl -sSfL https://github.com/mvdan/sh/releases/download/v3.12.0/shfmt_v3.12.0_linux_arm64 -o /tmp/shfmt && sudo mv /tmp/shfmt /usr/local/bin/shfmt && sudo chmod +x /usr/local/bin/shfmt && curl -sSfL https://github.com/google/yamlfmt/releases/download/v0.17.2/yamlfmt_0.17.2_Linux_arm64.tar.gz | tar -xz -C /tmp && sudo mv /tmp/yamlfmt /usr/local/bin/yamlfmt && curl -sSfL https://github.com/hadolint/hadolint/releases/download/v2.12.0/hadolint-Linux-x86_64 -o /tmp/hadolint && sudo mv /tmp/hadolint /usr/local/bin/hadolint && sudo chmod +x /usr/local/bin/hadolint && curl -sSfL https://github.com/evilmartians/lefthook/releases/download/v1.12.2/lefthook_1.12.2_Linux_x86_64.gz -o /tmp/lefthook.gz && gunzip /tmp/lefthook.gz && sudo mv /tmp/lefthook /usr/local/bin/lefthook && sudo chmod +x /usr/local/bin/lefthook && echo \"Formatting tools installed: shfmt $(shfmt --version), yamlfmt $(yamlfmt --version), hadolint $(hadolint --version), lefthook $(lefthook version)\" && lefthook install'",
 	"customizations": {
 		"vscode": {
 			"extensions": [
