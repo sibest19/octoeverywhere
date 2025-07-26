@@ -32,7 +32,7 @@ jobs:
           ./health-check.sh "ghcr.io/${{ github.repository_owner }}/octoeverywhere:${IMAGE_TAG}"
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_CHAT_ID: ${{ vars.TELEGRAM_CHAT_ID }}
       
       - name: Create issue on health check failure
         if: failure()
