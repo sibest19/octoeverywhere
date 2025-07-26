@@ -76,8 +76,60 @@ The wrapper automatically adapts to upstream changes without manual updates.
 
 GitHub Actions automatically:
 - Checks daily for upstream image updates
-- Rebuilds only when upstream changes
-- Publishes to `ghcr.io/sibest19/octoeverywhere` with `latest` and version tags
+- **Detects significant changes** (entrypoint/command modifications) and alerts
+- **Tests images before promotion** using comprehensive test suite
+- **Maintains backup tags** (`stable-backup`) for emergency rollbacks
+- Only rebuilds when upstream changes to avoid unnecessary churn
+- Publishes to `ghcr.io/sibest19/octoeverywhere` with multiple tags:
+  - `latest` - Current stable version (tested)
+  - `stable` - Alias for latest stable
+  - `stable-backup` - Previous stable version  
+  - `v<version>` - Version-specific tags
+
+### Resilience Features
+
+- **Pre-deployment testing**: All images are tested before being tagged as `latest`
+- **Change detection**: Alerts when upstream makes significant changes that might break compatibility
+- **Emergency rollback**: Manual workflow to quickly revert to previous stable version
+- **Health monitoring**: Standalone script for continuous monitoring (`health-check.sh`)
+
+## Troubleshooting
+
+### Emergency Rollback
+
+If the latest version has issues, you can quickly rollback:
+
+1. **Use stable backup tag:**
+   ```bash
+   docker pull ghcr.io/sibest19/octoeverywhere:stable-backup
+   docker tag ghcr.io/sibest19/octoeverywhere:stable-backup ghcr.io/sibest19/octoeverywhere:latest
+   ```
+
+2. **Trigger automated rollback:**
+   - Go to Actions → Emergency Rollback → Run workflow
+   - Select the target tag (e.g., `stable-backup`) 
+   - Provide a reason for the rollback
+
+### Health Monitoring
+
+Run the included health check script:
+```bash
+./health-check.sh
+```
+
+Set environment variables for alerts:
+```bash
+export SLACK_WEBHOOK="https://hooks.slack.com/..."
+export ALERT_EMAIL="admin@example.com"
+./health-check.sh
+```
+
+### Testing Changes
+
+Test the wrapper locally:
+```bash
+./test-wrapper.sh ghcr.io/sibest19/octoeverywhere:latest
+```
 
 ## Contributing
 

@@ -1,0 +1,86 @@
+name: Emergency Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      rollback_to:
+        description: 'Tag to rollback to (e.g., stable-backup, v1.2.3)'
+        required: true
+        default: 'stable-backup'
+      reason:
+        description: 'Reason for rollback'
+        required: true
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    
+    steps:
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Verify rollback target exists
+        run: |
+          if ! docker pull ghcr.io/${{ github.repository_owner }}/octoeverywhere:${{ github.event.inputs.rollback_to }}; then
+            echo "::error::Rollback target ${{ github.event.inputs.rollback_to }} does not exist!"
+            exit 1
+          fi
+          echo "Rollback target verified"
+      
+      - name: Backup current latest before rollback
+        run: |
+          if docker pull ghcr.io/${{ github.repository_owner }}/octoeverywhere:latest 2>/dev/null; then
+            docker tag ghcr.io/${{ github.repository_owner }}/octoeverywhere:latest \
+              ghcr.io/${{ github.repository_owner }}/octoeverywhere:pre-rollback-backup
+            docker push ghcr.io/${{ github.repository_owner }}/octoeverywhere:pre-rollback-backup
+            echo "Current version backed up as pre-rollback-backup"
+          fi
+      
+      - name: Perform rollback
+        run: |
+          # Tag the rollback target as latest
+          docker tag ghcr.io/${{ github.repository_owner }}/octoeverywhere:${{ github.event.inputs.rollback_to }} \
+            ghcr.io/${{ github.repository_owner }}/octoeverywhere:latest
+          docker push ghcr.io/${{ github.repository_owner }}/octoeverywhere:latest
+          
+          echo "::notice title=Rollback Complete::Successfully rolled back to ${{ github.event.inputs.rollback_to }}"
+          echo "Reason: ${{ github.event.inputs.reason }}"
+      
+      - name: Create rollback issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Emergency Rollback Performed - ${new Date().toISOString().split('T')[0]}`,
+              body: `## Emergency Rollback Details
+              
+              **Rollback Target:** \`${{ github.event.inputs.rollback_to }}\`
+              **Reason:** ${{ github.event.inputs.reason }}
+              **Performed By:** @${{ github.actor }}
+              **Date:** ${new Date().toISOString()}
+              
+              ## Actions Taken
+              - ✅ Current \`latest\` backed up as \`pre-rollback-backup\`
+              - ✅ Rolled back \`latest\` to \`${{ github.event.inputs.rollback_to }}\`
+              
+              ## Next Steps
+              - [ ] Investigate the issue that caused the rollback
+              - [ ] Fix the underlying problem
+              - [ ] Test the fix thoroughly
+              - [ ] Deploy the fix and close this issue
+              
+              ## Available Backup Tags
+              - \`pre-rollback-backup\` - Version that was rolled back from
+              - \`stable-backup\` - Previous stable version
+              `,
+              labels: ['rollback', 'urgent']
+            })

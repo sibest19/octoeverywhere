@@ -1,0 +1,77 @@
+name: Health Check
+
+on:
+  schedule:
+    # Run every 30 minutes
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Image tag to health check (default: latest)'
+        required: false
+        default: 'latest'
+
+jobs:
+  health-check:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Make health check script executable
+        run: chmod +x health-check.sh
+      
+      - name: Run health check
+        run: |
+          IMAGE_TAG="${{ github.event.inputs.image_tag || 'latest' }}"
+          ./health-check.sh "ghcr.io/${{ github.repository_owner }}/octoeverywhere:${IMAGE_TAG}"
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      
+      - name: Create issue on health check failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Check if there's already an open health check issue
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'health-check,automated'
+            });
+            
+            if (issues.data.length === 0) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `Health Check Failed - ${new Date().toISOString().split('T')[0]}`,
+                body: `## Health Check Failure Alert
+                
+                **Date:** ${new Date().toISOString()}
+                **Workflow:** [${context.workflow}](${context.payload.repository.html_url}/actions/runs/${context.runId})
+                **Image:** ghcr.io/${{ github.repository_owner }}/octoeverywhere:${{ github.event.inputs.image_tag || 'latest' }}
+                
+                ## What Happened
+                The automated health check failed. This could indicate:
+                - Image is not available or corrupted
+                - Basic functionality is broken  
+                - Upstream configuration has changed significantly
+                - Container fails to start or crashes quickly
+                
+                ## Next Steps
+                1. Check the [workflow logs](${context.payload.repository.html_url}/actions/runs/${context.runId}) for details
+                2. Run the health check locally: \`./health-check.sh\`
+                3. If there's a real issue, consider using the [Emergency Rollback](${context.payload.repository.html_url}/actions/workflows/rollback.yml) workflow
+                4. Close this issue once the problem is resolved
+                
+                ## Manual Health Check
+                You can run a manual health check anytime:
+                - Go to Actions → Health Check → Run workflow
+                - Or run locally: \`./health-check.sh [image-tag]\`
+                `,
+                labels: ['health-check', 'automated', 'urgent']
+              });
+            }
