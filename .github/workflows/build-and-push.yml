@@ -91,6 +91,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
+          platforms: linux/amd64,linux/arm64
           push: true   # Push candidate so other jobs can use it
           build-args: |
             UPSTREAM_ENTRYPOINT=${{ needs.check-upstream.outputs.upstream-entrypoint }}

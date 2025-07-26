@@ -9,9 +9,14 @@ TEST_DIR="$(mktemp -d)"
 FAILED_TESTS=0
 
 cleanup() {
-    rm -rf "$TEST_DIR"
+    # Clean up docker containers first
     docker stop test-octo 2>/dev/null || true
     docker rm test-octo 2>/dev/null || true
+    
+    # Try to remove test directory, use sudo if needed for root-owned files
+    if [ -d "$TEST_DIR" ]; then
+        rm -rf "$TEST_DIR" 2>/dev/null || sudo rm -rf "$TEST_DIR" 2>/dev/null || true
+    fi
 }
 trap cleanup EXIT
 
