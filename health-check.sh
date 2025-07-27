@@ -146,7 +146,7 @@ main() {
   echo "==========================================="
   if [[ $failed -eq 0 ]]; then
     echo "✅ All health checks passed!"
-    send_alert "OctoEverywhere wrapper health check: All systems operational" "INFO"
+    # send_alert "OctoEverywhere wrapper health check: All systems operational" "INFO"
   else
     echo "❌ $failed health check(s) failed!"
     send_alert "$failed health checks failed for OctoEverywhere wrapper" "ERROR"
