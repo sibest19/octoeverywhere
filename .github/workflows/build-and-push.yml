@@ -130,16 +130,43 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Pull candidate image
-        run: docker pull ghcr.io/${{ github.repository_owner }}/octoeverywhere:candidate
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
       - name: Promote candidate to latest
-        run: "# Re-tag and push the tested candidate as latest and version-specific\ndocker tag ghcr.io/${{ github.repository_owner }}/octoeverywhere:candidate \\\n  ghcr.io/${{ github.repository_owner }}/octoeverywhere:latest\ndocker tag ghcr.io/${{ github.repository_owner }}/octoeverywhere:candidate \\\n  ghcr.io/${{ github.repository_owner }}/octoeverywhere:${{ needs.check-upstream.outputs.upstream-tag }}\n  \ndocker push ghcr.io/${{ github.repository_owner }}/octoeverywhere:latest\ndocker push ghcr.io/${{ github.repository_owner }}/octoeverywhere:${{ needs.check-upstream.outputs.upstream-tag }}\n"
+        run: |
+          # Use imagetools create to preserve the multi-platform manifest
+          docker buildx imagetools create \
+            --tag ghcr.io/${{ github.repository_owner }}/octoeverywhere:latest \
+            --tag ghcr.io/${{ github.repository_owner }}/octoeverywhere:${{ needs.check-upstream.outputs.upstream-tag }} \
+            ghcr.io/${{ github.repository_owner }}/octoeverywhere:candidate
+  notify-significant-change:
+    needs: [check-upstream, promote]
+    if: needs.check-upstream.outputs.significant-change == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify significant upstream change via Telegram
+        run: |
+          MESSAGE="⚠️ <b>OctoEverywhere: significant upstream change deployed</b>%0A%0AThe upstream image entrypoint or command changed. Please verify the wrapper still works correctly.%0A%0A<b>Repo:</b> ${{ github.repository }}%0A<b>Run:</b> ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d parse_mode="HTML" \
+            -d text="${MESSAGE}"
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ vars.TELEGRAM_CHAT_ID }}
   notify-failure:
     needs: [check-upstream, build, test]
     if: failure() && needs.check-upstream.outputs.should-build == 'true'
     runs-on: ubuntu-latest
     steps:
-      - name: Notify build failure
+      - name: Notify build failure via Telegram
         run: |
           echo "::error title=Build Failed::Wrapper image build or test failed. Check logs and upstream compatibility."
-          # Add your notification method here (Slack, email, etc.)
+          MESSAGE="❌ <b>OctoEverywhere wrapper build failed</b>%0A%0A<b>Repo:</b> ${{ github.repository }}%0A<b>Run:</b> ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}%0A<b>Trigger:</b> ${{ github.event_name }}"
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d parse_mode="HTML" \
+            -d text="${MESSAGE}"
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ vars.TELEGRAM_CHAT_ID }}
