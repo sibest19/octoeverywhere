@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       rollback_to:
-        description: 'Tag to rollback to (e.g., v1.2.3)'
+        description: 'Tag to rollback to (e.g., 5.0.1)'
         required: true
       reason:
         description: 'Reason for rollback'
@@ -16,7 +16,7 @@ jobs:
       packages: write
     steps:
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -46,6 +46,6 @@ jobs:
           echo "::notice title=Rollback Complete::Successfully rolled back to ${{ github.event.inputs.rollback_to }}"
           echo "Reason: ${{ github.event.inputs.reason }}"
       - name: Create rollback issue
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: "github.rest.issues.create({\n  owner: context.repo.owner,\n  repo: context.repo.repo,\n  title: `Emergency Rollback Performed - ${new Date().toISOString().split('T')[0]}`,\n  body: `## Emergency Rollback Details\n  \n  **Rollback Target:** \\`${{ github.event.inputs.rollback_to }}\\`\n  **Reason:** ${{ github.event.inputs.reason }}\n  **Performed By:** @${{ github.actor }}\n  **Date:** ${new Date().toISOString()}\n  \n  ## Actions Taken\n  - ✅ Current \\`latest\\` backed up as \\`pre-rollback-backup\\`\n  - ✅ Rolled back \\`latest\\` to \\`${{ github.event.inputs.rollback_to }}\\`\n  \n  ## Next Steps\n  - [ ] Investigate the issue that caused the rollback\n  - [ ] Fix the underlying problem\n  - [ ] Test the fix thoroughly\n  - [ ] Deploy the fix and close this issue\n  \n  ## Available Backup Tags\n  - \\`pre-rollback-backup\\` - Version that was rolled back from\n  - \\`v<version>\\` - Version-specific tags\n  `,\n  labels: ['rollback', 'urgent']\n})\n"

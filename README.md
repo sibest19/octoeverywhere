@@ -88,9 +88,14 @@ GitHub Actions automatically:
 - **Detects significant changes** (entrypoint/command modifications) and alerts
 - **Tests images before promotion** using comprehensive test suite
 - Only rebuilds when upstream changes to avoid unnecessary churn
-- Publishes to `ghcr.io/sibest19/octoeverywhere` with multiple tags:
+- Publishes to `ghcr.io/sibest19/octoeverywhere` with cascading semver tags that
+  mirror the upstream version (e.g. upstream `5.0.2` produces):
   - `latest` - Current stable version (tested)
-  - `v<version>` - Version-specific tags
+  - `5` - Latest release of that major version
+  - `5.0` - Latest release of that major.minor version
+  - `5.0.2` - This exact version
+  Nothing is pushed to the registry until the test suite passes, so a broken
+  build never leaves a usable-looking tag behind.
 
 ### Resilience Features
 
@@ -105,7 +110,7 @@ If something breaks, quickly revert to a previous version:
 
 **Option 1: Use a specific version**
 ```bash
-docker pull ghcr.io/sibest19/octoeverywhere:v1.2.3
+docker pull ghcr.io/sibest19/octoeverywhere:5.0.1
 ```
 
 **Option 2: Automated rollback**

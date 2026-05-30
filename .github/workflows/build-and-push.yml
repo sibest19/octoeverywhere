@@ -32,18 +32,18 @@ jobs:
           echo "upstream-entrypoint=$UPSTREAM_ENTRYPOINT" >> $GITHUB_OUTPUT
           echo "upstream-cmd=$UPSTREAM_CMD" >> $GITHUB_OUTPUT
 
-          # Extract upstream version/tag if available
+          # Extract upstream version/tag if available (e.g. "5.0.2"); falls back to "latest"
           UPSTREAM_TAG=$(docker image inspect octoeverywhere/octoeverywhere:latest --format='{{index .Config.Labels "org.opencontainers.image.version"}}' 2>/dev/null || echo "latest")
           echo "upstream-tag=$UPSTREAM_TAG" >> $GITHUB_OUTPUT
 
-          # Check if we have this digest already
+          # Read back what we last published, from the index annotations on our :latest
           EXISTING_DIGEST=$(docker manifest inspect ghcr.io/${{ github.repository_owner }}/octoeverywhere:latest 2>/dev/null | jq -r '.annotations."upstream.digest" // empty' || echo "")
           EXISTING_ENTRYPOINT=$(docker manifest inspect ghcr.io/${{ github.repository_owner }}/octoeverywhere:latest 2>/dev/null | jq -r '.annotations."upstream.entrypoint" // empty' || echo "")
           EXISTING_CMD=$(docker manifest inspect ghcr.io/${{ github.repository_owner }}/octoeverywhere:latest 2>/dev/null | jq -r '.annotations."upstream.cmd" // empty' || echo "")
 
           # Check for significant changes that might break our wrapper
           SIGNIFICANT_CHANGE="false"
-          if [ "$UPSTREAM_ENTRYPOINT" != "$EXISTING_ENTRYPOINT" ] || [ "$UPSTREAM_CMD" != "$EXISTING_CMD" ]; then
+          if [ -n "$EXISTING_ENTRYPOINT" ] && { [ "$UPSTREAM_ENTRYPOINT" != "$EXISTING_ENTRYPOINT" ] || [ "$UPSTREAM_CMD" != "$EXISTING_CMD" ]; }; then
             echo "⚠️ SIGNIFICANT CHANGE DETECTED ⚠️"
             echo "Entrypoint changed: $EXISTING_ENTRYPOINT -> $UPSTREAM_ENTRYPOINT"
             echo "Command changed: $EXISTING_CMD -> $UPSTREAM_CMD"
@@ -60,7 +60,10 @@ jobs:
             echo "should-build=false" >> $GITHUB_OUTPUT
             echo "No upstream changes detected"
           fi
-  build:
+
+  # Single job on a single runner: nothing is pushed to the registry until the
+  # tests pass, so we never publish a usable-looking tag for a broken build.
+  build-test-publish:
     needs: check-upstream
     if: needs.check-upstream.outputs.should-build == 'true'
     runs-on: ubuntu-latest
@@ -69,78 +72,83 @@ jobs:
       packages: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Build and push
-        id: build
-        uses: docker/build-push-action@v5
+
+      # Build amd64 locally and load it — NOT pushed. This is the artifact we test.
+      - name: Build test image (amd64, local)
+        uses: docker/build-push-action@v7
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
-          push: true # Push candidate so other jobs can use it
+          load: true
+          platforms: linux/amd64
+          tags: octoeverywhere:test
           build-args: |
             UPSTREAM_ENTRYPOINT=${{ needs.check-upstream.outputs.upstream-entrypoint }}
             UPSTREAM_CMD=${{ needs.check-upstream.outputs.upstream-cmd }}
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/octoeverywhere:candidate
-            ghcr.io/${{ github.repository_owner }}/octoeverywhere:${{ needs.check-upstream.outputs.upstream-tag }}-candidate
-          annotations: |
-            upstream.digest=${{ needs.check-upstream.outputs.upstream-digest }}
-            upstream.tag=${{ needs.check-upstream.outputs.upstream-tag }}
-            upstream.entrypoint=${{ needs.check-upstream.outputs.upstream-entrypoint }}
-            upstream.cmd=${{ needs.check-upstream.outputs.upstream-cmd }}
-            build.date=${{ github.run_id }}
-  test:
-    needs: [check-upstream, build]
-    if: needs.check-upstream.outputs.should-build == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Pull candidate image for testing
-        run: |
-          docker pull ghcr.io/${{ github.repository_owner }}/octoeverywhere:candidate
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
       - name: Run comprehensive tests
         run: |
-          ./test-wrapper.sh ghcr.io/${{ github.repository_owner }}/octoeverywhere:candidate
-  promote:
-    needs: [check-upstream, build, test]
-    if: needs.check-upstream.outputs.should-build == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+          ./test-wrapper.sh octoeverywhere:test
+
+      # Generate the cascading semver tags from the upstream version label.
+      # 5.0.2 -> :5.0.2, :5.0, :5 (plus :latest). If the label is ever not a
+      # valid semver, the semver tags are silently skipped and only :latest is set.
+      - name: Compute release tags
+        id: meta
+        uses: docker/metadata-action@v6
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Promote candidate to latest
-        run: |
-          # Use imagetools create to preserve the multi-platform manifest
-          docker buildx imagetools create \
-            --tag ghcr.io/${{ github.repository_owner }}/octoeverywhere:latest \
-            --tag ghcr.io/${{ github.repository_owner }}/octoeverywhere:${{ needs.check-upstream.outputs.upstream-tag }} \
-            ghcr.io/${{ github.repository_owner }}/octoeverywhere:candidate
+          images: ghcr.io/${{ github.repository_owner }}/octoeverywhere
+          flavor: |
+            latest=true
+          tags: |
+            type=semver,pattern={{version}},value=${{ needs.check-upstream.outputs.upstream-tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.check-upstream.outputs.upstream-tag }}
+            type=semver,pattern={{major}},value=${{ needs.check-upstream.outputs.upstream-tag }}
+
+      # Tests passed: build multi-arch and push straight to the release tags.
+      # No candidate/intermediate tags are ever created.
+      - name: Build and push release tags (multi-arch)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          # build-push-action v6+ enables provenance/SBOM attestations by default,
+          # which add an extra "unknown/unknown" entry to the image index. Disable
+          # to keep the published index to exactly the two real platforms.
+          provenance: false
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            UPSTREAM_ENTRYPOINT=${{ needs.check-upstream.outputs.upstream-entrypoint }}
+            UPSTREAM_CMD=${{ needs.check-upstream.outputs.upstream-cmd }}
+          # Annotations are written on the image index so check-upstream can read
+          # them back via `docker manifest inspect` on the next run.
+          annotations: |
+            index:upstream.digest=${{ needs.check-upstream.outputs.upstream-digest }}
+            index:upstream.tag=${{ needs.check-upstream.outputs.upstream-tag }}
+            index:upstream.entrypoint=${{ needs.check-upstream.outputs.upstream-entrypoint }}
+            index:upstream.cmd=${{ needs.check-upstream.outputs.upstream-cmd }}
+            index:build.run=${{ github.run_id }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   notify-significant-change:
-    needs: [check-upstream, promote]
+    needs: [check-upstream, build-test-publish]
     if: needs.check-upstream.outputs.significant-change == 'true'
     runs-on: ubuntu-latest
     steps:
@@ -155,7 +163,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ vars.TELEGRAM_CHAT_ID }}
   notify-failure:
-    needs: [check-upstream, build, test]
+    needs: [check-upstream, build-test-publish]
     if: failure() && needs.check-upstream.outputs.should-build == 'true'
     runs-on: ubuntu-latest
     steps:
