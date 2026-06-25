@@ -32,8 +32,32 @@ jobs:
           echo "upstream-entrypoint=$UPSTREAM_ENTRYPOINT" >> $GITHUB_OUTPUT
           echo "upstream-cmd=$UPSTREAM_CMD" >> $GITHUB_OUTPUT
 
-          # Extract upstream version/tag if available (e.g. "5.0.2"); falls back to "latest"
-          UPSTREAM_TAG=$(docker image inspect octoeverywhere/octoeverywhere:latest --format='{{index .Config.Labels "org.opencontainers.image.version"}}' 2>/dev/null || echo "latest")
+          # Resolve the upstream version (e.g. "5.1.1") using several methods,
+          # most-authoritative-but-fragile first, each only accepted if it looks
+          # like a semver. This way a single upstream change (dropping a label,
+          # moving a file) degrades to the next method instead of breaking the build.
+          is_semver() { echo "$1" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?$'; }
+          UPSTREAM_TAG=""
+
+          # Method 1 (legacy): the org.opencontainers.image.version label, if set.
+          CANDIDATE=$(docker image inspect octoeverywhere/octoeverywhere:latest --format='{{index .Config.Labels "org.opencontainers.image.version"}}' 2>/dev/null || true)
+          if is_semver "$CANDIDATE"; then UPSTREAM_TAG="$CANDIDATE"; echo "Version from image label: $UPSTREAM_TAG"; fi
+
+          # Method 2: pyproject.toml baked into the image (REPO_DIR=/app/octoeverywhere).
+          # Upstream COPYs the whole repo in, so this tracks exactly what :latest contains.
+          if [ -z "$UPSTREAM_TAG" ]; then
+            CANDIDATE=$(docker run --rm --entrypoint cat octoeverywhere/octoeverywhere:latest /app/octoeverywhere/pyproject.toml 2>/dev/null \
+              | grep -E '^version[[:space:]]*=' | head -1 | sed -E 's/.*=[[:space:]]*"([^"]+)".*/\1/')
+            if is_semver "$CANDIDATE"; then UPSTREAM_TAG="$CANDIDATE"; echo "Version from pyproject.toml: $UPSTREAM_TAG"; fi
+          fi
+
+          # No semver found by any method: leave it as "latest" so the downstream
+          # metadata step produces an empty tag list and the build fails loudly
+          # (and notifies via Telegram). We intentionally never publish an
+          # unversioned image — every release must carry a real semver.
+          if [ -z "$UPSTREAM_TAG" ]; then UPSTREAM_TAG="latest"; echo "::warning::Could not resolve a semver version upstream; the build will fail rather than publish an unversioned image."; fi
+
+          echo "Resolved upstream version: $UPSTREAM_TAG"
           echo "upstream-tag=$UPSTREAM_TAG" >> $GITHUB_OUTPUT
 
           # Read back what we last published, from the index annotations on our :latest
@@ -105,9 +129,13 @@ jobs:
         run: |
           ./test-wrapper.sh octoeverywhere:test
 
-      # Generate the cascading semver tags from the upstream version label.
-      # 5.0.2 -> :5.0.2, :5.0, :5 (plus :latest). If the label is ever not a
-      # valid semver, the semver tags are silently skipped and only :latest is set.
+      # Generate the cascading semver tags from the upstream version (resolved in
+      # check-upstream). 5.1.1 -> :5.1.1, :5.1, :5. flavor: latest=true promotes
+      # the resolved semver to also carry :latest, so every publish is consistently
+      # semver-driven. If the version is ever not a valid semver (all resolution
+      # methods failed), the semver tags are skipped, the tag list is empty, and
+      # the push fails — intentional: we only ever publish semver-versioned images
+      # rather than an unversioned :latest. The failure is surfaced via Telegram.
       - name: Compute release tags
         id: meta
         uses: docker/metadata-action@v6
