@@ -1,184 +1,104 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-# Test script for the OctoEverywhere wrapper image
-# Usage: ./test-wrapper.sh [image-tag]
-
-IMAGE_TAG=${1:-"ghcr.io/sibest19/octoeverywhere:latest"}
-TEST_DIR="$(mktemp -d)"
-FAILED_TESTS=0
-
+IMAGE_TAG=${1:-ghcr.io/sibest19/octoeverywhere:latest}
+TEST_DIR=$(mktemp -d)
+CONTAINER_NAME="test-octo-$$"
 cleanup() {
-  # Clean up docker containers first
-  docker stop test-octo 2>/dev/null || true
-  docker rm test-octo 2>/dev/null || true
-
-  # Clean up test directory with better error handling
-  if [ -d "$TEST_DIR" ]; then
-    rm -rf "$TEST_DIR" 2>/dev/null || sudo rm -rf "$TEST_DIR" 2>/dev/null || {
-      log "Warning: Could not remove test directory $TEST_DIR"
-    }
-  fi
+  docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+  rm -rf "$TEST_DIR"
 }
 trap cleanup EXIT
 
-log() {
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
-}
+# Each docker command must fail the suite if an assertion fails.
+docker run --rm --entrypoint sh "$IMAGE_TAG" -ec '
+  test -x /entrypoint.sh
+  command -v su-exec
+  command -v python3
+  jq -e "(.entrypoint | type == \"array\" or . == null) and (.cmd | type == \"array\" or . == null)" /upstream_config.json
+'
 
-test_basic_functionality() {
-  log "Testing basic functionality..."
+PROBE='import json, os, sys
+assert os.getuid() == int(os.environ["PUID"])
+assert os.getgid() == int(os.environ["PGID"])
+assert os.getpid() == 1
+assert sys.argv[1:] == json.loads(os.environ["EXPECTED_ARGS"]), sys.argv
+for path in ("/data", "/data/root_file"):
+    stat = os.stat(path)
+    assert stat.st_uid == os.getuid() and stat.st_gid == os.getgid()
+with open("/data/writable", "w") as output:
+    output.write("ok")
+assert not os.path.exists("/data/injected")
+print("Entrypoint, arguments and permissions: PASSED")'
+# shellcheck disable=SC2016 # Shell syntax is a literal test argument.
+ARGS='["argument with spaces", "", "\"quotes\"", "$(touch /data/injected)", "line\nbreak"]'
+jq -n --arg probe "$PROBE" --argjson args "$ARGS" \
+  '{entrypoint: ["python3", "-c", $probe], cmd: $args}' >"$TEST_DIR/config.json"
 
-  # Test that the image can start and basic tools are present - use tmpfs for consistency
-  docker run --rm \
-    -e PUID=1000 \
-    -e PGID=1000 \
-    --tmpfs /data \
-    --entrypoint="" \
-    "$IMAGE_TAG" \
-    sh -c "
-            # Check required files and tools
-            test -x /entrypoint.sh || (echo 'entrypoint.sh missing or not executable' && exit 1)
-            which su-exec || (echo 'su-exec not installed' && exit 1)
-            which jq || (echo 'jq not installed' && exit 1)
-            test -f /upstream_config || (echo 'upstream_config missing' && exit 1)
-            echo 'Basic functionality test: PASSED'
-        " || {
-    log "Basic functionality test: FAILED"
-    ((FAILED_TESTS++))
-  }
-}
+for ids in 1000:1000 1001:0 1001:1001; do
+  docker run --rm --tmpfs /data \
+    -e PUID="${ids%:*}" -e PGID="${ids#*:}" -e EXPECTED_ARGS="$ARGS" \
+    -v "$TEST_DIR/config.json:/upstream_config.json:ro" \
+    --entrypoint sh "$IMAGE_TAG" -ec 'touch /data/root_file; exec /entrypoint.sh'
+done
 
-test_privilege_dropping() {
-  log "Testing privilege dropping..."
+# Runtime arguments replace CMD and are appended to ENTRYPOINT.
+docker run --rm --tmpfs /data \
+  -e PUID=1000 -e PGID=1000 -e EXPECTED_ARGS='["replacement argument", ""]' \
+  -v "$TEST_DIR/config.json:/upstream_config.json:ro" \
+  --entrypoint sh "$IMAGE_TAG" -ec 'touch /data/root_file; exec /entrypoint.sh "$@"' sh 'replacement argument' ''
 
-  # Create a test file as root, then check if container can access it with correct permissions
-  sudo touch "$TEST_DIR/root_file" 2>/dev/null || touch "$TEST_DIR/root_file"
+# A CMD-only image must also work.
+jq '.cmd = (.entrypoint + .cmd) | .entrypoint = null' "$TEST_DIR/config.json" >"$TEST_DIR/cmd-only.json"
+docker run --rm --tmpfs /data \
+  -e PUID=1000 -e PGID=1000 -e EXPECTED_ARGS="$ARGS" \
+  -v "$TEST_DIR/cmd-only.json:/upstream_config.json:ro" \
+  --entrypoint sh "$IMAGE_TAG" -ec 'touch /data/root_file; exec /entrypoint.sh'
 
-  # Test that su-exec works and can drop privileges properly
-  docker run --rm \
-    -e PUID=1000 \
-    -e PGID=1000 \
-    -v "$TEST_DIR:/data" \
-    --entrypoint="" \
-    "$IMAGE_TAG" \
-    sh -c "
-            # Create user and group like the entrypoint does
-            addgroup -g 1000 testgroup 2>/dev/null || true
-            adduser -D -H -u 1000 -G testgroup testuser 2>/dev/null || true
-            chown -R 1000:1000 /data
-            
-            # Test su-exec privilege dropping
-            RESULT=\$(su-exec 1000:1000 sh -c 'id -u')
-            test \"\$RESULT\" = \"1000\" || (echo 'UID test failed' && exit 1)
-            
-            RESULT=\$(su-exec 1000:1000 sh -c 'id -g')  
-            test \"\$RESULT\" = \"1000\" || (echo 'GID test failed' && exit 1)
-            
-            # Test data directory access
-            su-exec 1000:1000 sh -c 'test -w /data' || (echo 'Data access test failed' && exit 1)
-            
-            echo 'Privilege dropping test: PASSED'
-        " || {
-    log "Privilege dropping test: FAILED"
-    ((FAILED_TESTS++))
-  }
-}
-
-test_data_ownership() {
-  log "Testing data directory ownership..."
-
-  # Test that /data ownership can be properly set
-  docker run --rm \
-    -e PUID=1001 \
-    -e PGID=1001 \
-    -v "$TEST_DIR:/data" \
-    --entrypoint="" \
-    "$IMAGE_TAG" \
-    sh -c "
-            # Create user and group like the entrypoint does
-            addgroup -g 1001 testgroup 2>/dev/null || true
-            adduser -D -H -u 1001 -G testgroup testuser 2>/dev/null || true
-            chown -R 1001:1001 /data
-            
-            # Test ownership as the target user
-            su-exec 1001:1001 sh -c 'test -O /data && test -G /data' || exit 1
-            echo 'Data ownership test: PASSED'
-        " || {
-    log "Data ownership test: FAILED"
-    ((FAILED_TESTS++))
-  }
-}
-
-test_upstream_config() {
-  log "Testing upstream configuration..."
-
-  docker run --rm \
-    --entrypoint="" \
-    "$IMAGE_TAG" \
-    sh -c "
-            . /upstream_config
-            test -n \"\$UPSTREAM_ENTRYPOINT\" || (echo 'UPSTREAM_ENTRYPOINT not set' && exit 1)
-            # Check if config looks like valid JSON or command
-            echo \"\$UPSTREAM_ENTRYPOINT\" | grep -E '^\[.*\]$|^/|^python' || (echo 'UPSTREAM_ENTRYPOINT format invalid' && exit 1)
-            echo 'Upstream config test: PASSED'
-        " || {
-    log "Upstream config test: FAILED"
-    ((FAILED_TESTS++))
-  }
-}
-
-test_container_startup() {
-  log "Testing full container startup (5 second timeout)..."
-
-  # Test that the container can start without immediate crashes - use tmpfs for consistency
-  docker run -d \
-    --name test-octo \
-    -e PUID=1000 \
-    -e PGID=1000 \
-    -e COMPANION_MODE=test \
-    -e SERIAL_NUMBER=test \
-    -e ACCESS_CODE=test \
-    -e PRINTER_IP=127.0.0.1 \
-    --tmpfs /data \
-    "$IMAGE_TAG" || {
-    log "Container startup test: FAILED"
-    ((FAILED_TESTS++))
-    return
-  }
-
-  # Wait a moment and check if container is still running
-  sleep 5
-
-  if docker ps | grep -q test-octo; then
-    log "Container startup test: PASSED"
-  else
-    log "Container startup test: FAILED (container exited)"
-    log "Container logs:"
-    docker logs test-octo
-    ((FAILED_TESTS++))
+expect_failure() {
+  local message=$1
+  shift
+  if docker run --rm "$@" "$IMAGE_TAG" >"$TEST_DIR/failure.log" 2>&1; then
+    echo "Expected failure: $message" >&2
+    exit 1
   fi
-
-  docker stop test-octo 2>/dev/null || true
-  docker rm test-octo 2>/dev/null || true
+  cat "$TEST_DIR/failure.log"
+  grep -F "$message" "$TEST_DIR/failure.log"
 }
 
-# Run all tests
-log "Starting wrapper image tests for: $IMAGE_TAG"
-log "Test directory: $TEST_DIR"
+for variable in PUID PGID; do
+  for value in '' invalid -1 01 4294967295; do
+    expect_failure '[ERROR] PUID and PGID must be' --tmpfs /data -e "$variable=$value"
+  done
+done
 
-test_basic_functionality
-test_privilege_dropping
-test_data_ownership
-test_upstream_config
-test_container_startup
+expect_failure '[ERROR] PUID must be nonzero' --tmpfs /data -e PUID=0
 
-# Summary
-log "============================================"
-if [ $FAILED_TESTS -eq 0 ]; then
-  log "All tests PASSED! ✅"
-  exit 0
-else
-  log "$FAILED_TESTS test(s) FAILED! ❌"
+mkdir "$TEST_DIR/read-only"
+expect_failure '[ERROR] Cannot set /data ownership' \
+  -e PUID=1000 -e PGID=1000 -v "$TEST_DIR/read-only:/data:ro"
+
+printf '%s\n' '{"entrypoint": "invalid", "cmd": null}' >"$TEST_DIR/invalid.json"
+expect_failure '[ERROR] Invalid upstream entrypoint' --tmpfs /data \
+  -v "$TEST_DIR/invalid.json:/upstream_config.json:ro"
+printf '%s\n' '{"entrypoint": null, "cmd": null}' >"$TEST_DIR/empty.json"
+expect_failure '[ERROR] Upstream command is empty' --tmpfs /data \
+  -v "$TEST_DIR/empty.json:/upstream_config.json:ro"
+
+# Use a supported mode: the real application should retry an unreachable printer.
+docker run -d --name "$CONTAINER_NAME" --tmpfs /data \
+  -e PUID=1000 -e PGID=1000 -e COMPANION_MODE=klipper -e PRINTER_IP=127.0.0.1 "$IMAGE_TAG"
+sleep 5
+if [ "$(docker inspect --format '{{.State.Running}}' "$CONTAINER_NAME")" != true ]; then
+  docker logs "$CONTAINER_NAME"
   exit 1
 fi
+
+docker stop --time 5 "$CONTAINER_NAME" >/dev/null
+if [ "$(docker inspect --format '{{.State.ExitCode}}' "$CONTAINER_NAME")" != 0 ]; then
+  docker logs "$CONTAINER_NAME"
+  echo 'Container did not shut down cleanly' >&2
+  exit 1
+fi
+
+echo 'All wrapper tests PASSED'
