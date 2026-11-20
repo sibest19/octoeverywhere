@@ -23,7 +23,8 @@ send_alert() {
     "INFO") emoji="ℹ️" ;;
     esac
 
-    local telegram_message="${emoji} *OctoEverywhere Wrapper Alert*
+    local telegram_message
+    telegram_message="${emoji} *OctoEverywhere Wrapper Alert*
         
 *Severity:* ${severity}
 *Time:* $(date)
@@ -58,9 +59,18 @@ check_basic_functionality() {
     -e PUID=1000 \
     -e PGID=1000 \
     --tmpfs /data \
-    --entrypoint="" \
+    --entrypoint sh \
     "$IMAGE" \
-    sh -c "test -x /entrypoint.sh && which su-exec && which jq && test -f /upstream_config" >/dev/null 2>&1; then
+    -ec '
+      test -x /entrypoint.sh
+      command -v su-exec
+      command -v python3
+      if [ -f /upstream_config.json ]; then
+        jq -e "type == \"object\"" /upstream_config.json
+      else
+        test -s /upstream_config
+      fi
+    ' >/dev/null 2>&1; then
 
     send_alert "Basic functionality check failed for $IMAGE" "ERROR"
     return 1
@@ -71,29 +81,30 @@ check_basic_functionality() {
 check_upstream_changes() {
   echo "Checking for significant upstream changes..."
 
-  # Get current upstream image info
-  docker pull octoeverywhere/octoeverywhere:latest >/dev/null 2>&1
-  local upstream_entrypoint=$(docker image inspect octoeverywhere/octoeverywhere:latest --format='{{json .Config.Entrypoint}}')
-  local upstream_cmd=$(docker image inspect octoeverywhere/octoeverywhere:latest --format='{{json .Config.Cmd}}')
-
-  # Get our wrapper's stored config
-  local wrapper_entrypoint=$(docker run --rm --entrypoint="" "$IMAGE" sh -c '. /upstream_config && echo "$UPSTREAM_ENTRYPOINT"')
-  local wrapper_cmd=$(docker run --rm --entrypoint="" "$IMAGE" sh -c '. /upstream_config && echo "$UPSTREAM_CMD"')
-
-  # Normalize both for comparison by parsing as JSON arrays
-  local upstream_norm=$(echo "$upstream_entrypoint" | jq -r 'join(" ")' 2>/dev/null || echo "$upstream_entrypoint")
-  local wrapper_norm
-  if echo "$wrapper_entrypoint" | grep -q '^\[.*\]$'; then
-    # Convert [/path,-m,module] format to "/path" "-m" "module" and then parse
-    wrapper_entrypoint_json=$(echo "$wrapper_entrypoint" | sed 's/\[/["/; s/\]/"]/' | sed 's/,/","/g')
-    wrapper_norm=$(echo "$wrapper_entrypoint_json" | jq -r 'join(" ")' 2>/dev/null || echo "$wrapper_entrypoint")
-  else
-    wrapper_norm="$wrapper_entrypoint"
+  local upstream_config wrapper_config matches
+  wrapper_config=$(docker run --rm --entrypoint sh "$IMAGE" -ec '
+    if [ -f /upstream_config.json ]; then
+      cat /upstream_config.json
+    else
+      test -s /upstream_config
+    fi
+  ') || return 1
+  if [ -z "$wrapper_config" ]; then
+    echo "Legacy image: skipping upstream configuration comparison"
+    return 0
   fi
 
-  if [[ "$upstream_norm" != "$wrapper_norm" ]] || [[ "$upstream_cmd" != "$wrapper_cmd" ]]; then
-    send_alert "Upstream configuration mismatch detected! Wrapper may be outdated.\\nUpstream: $upstream_norm\\nWrapper: $wrapper_norm" "WARNING"
+  docker pull octoeverywhere/octoeverywhere:latest >/dev/null 2>&1 || return 1
+  upstream_config=$(docker image inspect octoeverywhere/octoeverywhere:latest --format='{{json .Config}}') || return 1
+
+  if ! matches=$(jq -n --argjson wrapper "$wrapper_config" --argjson upstream "$upstream_config" \
+    '$wrapper.entrypoint == $upstream.Entrypoint and $wrapper.cmd == $upstream.Cmd'); then
+    send_alert "Could not compare image configurations; check jq and the image metadata." "ERROR"
     return 1
+  fi
+  if [ "$matches" = false ]; then
+    send_alert "Image configuration differs from current upstream; this is expected after a rollback." "WARNING"
+    return 0
   fi
   echo "✅ Upstream configuration matches"
 }
@@ -101,16 +112,14 @@ check_upstream_changes() {
 check_container_startup() {
   echo "Checking container startup..."
   local container_name="health-check-$$"
-  trap "docker stop '$container_name' 2>/dev/null || true; docker rm '$container_name' 2>/dev/null || true" RETURN
+  trap 'docker rm -f "$container_name" >/dev/null 2>&1 || true' RETURN
 
   # Start container in background - use tmpfs instead of bind mount to avoid permission issues
   if ! docker run -d \
     --name "$container_name" \
     -e PUID=1000 \
     -e PGID=1000 \
-    -e COMPANION_MODE=test \
-    -e SERIAL_NUMBER=test \
-    -e ACCESS_CODE=test \
+    -e COMPANION_MODE=klipper \
     -e PRINTER_IP=127.0.0.1 \
     --tmpfs /data \
     "$IMAGE" >/dev/null 2>&1; then
@@ -121,8 +130,9 @@ check_container_startup() {
 
   # Wait a few seconds and check if still running
   sleep 5
-  if ! docker ps | grep -q "$container_name"; then
-    local logs=$(docker logs "$container_name" 2>&1 | tail -10)
+  if [ "$(docker inspect --format '{{.State.Running}}' "$container_name")" != true ]; then
+    local logs
+    logs=$(docker logs "$container_name" 2>&1 | tail -10)
     send_alert "Container exited unexpectedly during health check.\\nLogs:\\n$logs" "ERROR"
     return 1
   fi
@@ -138,10 +148,10 @@ main() {
 
   local failed=0
 
-  check_image_availability || ((failed++))
-  check_basic_functionality || ((failed++))
-  check_upstream_changes || ((failed++))
-  check_container_startup || ((failed++))
+  check_image_availability || failed=$((failed + 1))
+  check_basic_functionality || failed=$((failed + 1))
+  check_upstream_changes || failed=$((failed + 1))
+  check_container_startup || failed=$((failed + 1))
 
   echo "==========================================="
   if [[ $failed -eq 0 ]]; then

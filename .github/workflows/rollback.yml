@@ -8,44 +8,90 @@ on:
       reason:
         description: 'Reason for rollback'
         required: true
+concurrency:
+  group: octoeverywhere-release
+  cancel-in-progress: false
+  queue: max
 jobs:
   rollback:
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+      issues: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/octoeverywhere
+      ROLLBACK_TO: ${{ inputs.rollback_to }}
+      ROLLBACK_REASON: ${{ inputs.reason }}
     steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v4
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Verify rollback target exists
+      - name: Verify rollback target
+        id: target
         run: |
-          if ! docker pull ghcr.io/${{ github.repository_owner }}/octoeverywhere:${{ github.event.inputs.rollback_to }}; then
-            echo "::error::Rollback target ${{ github.event.inputs.rollback_to }} does not exist!"
+          DIGEST=$(docker buildx imagetools inspect "$IMAGE:$ROLLBACK_TO" --format '{{.Manifest.Digest}}')
+          INDEX=$(docker buildx imagetools inspect "$IMAGE@$DIGEST" --raw)
+          if ! jq -e '.mediaType == "application/vnd.oci.image.index.v1+json"' <<< "$INDEX" >/dev/null; then
+            echo "::error::Rollback requires an OCI image index."
             exit 1
           fi
-          echo "Rollback target verified"
-      - name: Backup current latest before rollback
-        run: |
-          if docker pull ghcr.io/${{ github.repository_owner }}/octoeverywhere:latest 2>/dev/null; then
-            docker tag ghcr.io/${{ github.repository_owner }}/octoeverywhere:latest \
-              ghcr.io/${{ github.repository_owner }}/octoeverywhere:pre-rollback-backup
-            docker push ghcr.io/${{ github.repository_owner }}/octoeverywhere:pre-rollback-backup
-            echo "Current version backed up as pre-rollback-backup"
+          if ! jq -e '
+            [.manifests[].platform | .os + "/" + .architecture] |
+            index("linux/amd64") != null and index("linux/arm64") != null
+          ' <<< "$INDEX" >/dev/null; then
+            echo "::error::Rollback requires both linux/amd64 and linux/arm64."
+            exit 1
           fi
-      - name: Perform rollback
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+      - name: Backup current latest before rollback
+        id: backup
         run: |
-          # Tag the rollback target as latest
-          docker tag ghcr.io/${{ github.repository_owner }}/octoeverywhere:${{ github.event.inputs.rollback_to }} \
-            ghcr.io/${{ github.repository_owner }}/octoeverywhere:latest
-          docker push ghcr.io/${{ github.repository_owner }}/octoeverywhere:latest
-
-          echo "::notice title=Rollback Complete::Successfully rolled back to ${{ github.event.inputs.rollback_to }}"
-          echo "Reason: ${{ github.event.inputs.reason }}"
+          DIGEST=$(docker buildx imagetools inspect "$IMAGE:latest" --format '{{.Manifest.Digest}}')
+          BLOCKED_DIGEST=$(docker buildx imagetools inspect "$IMAGE@$DIGEST" --raw | jq -er '
+            .annotations | ."rollback.blocked-upstream" // ."upstream.digest" // "manual"')
+          docker buildx imagetools create --tag "$IMAGE:pre-rollback-backup" "$IMAGE@$DIGEST"
+          echo "blocked-digest=$BLOCKED_DIGEST" >> "$GITHUB_OUTPUT"
+      - name: Perform rollback
+        env:
+          TARGET_DIGEST: ${{ steps.target.outputs.digest }}
+          BLOCKED_DIGEST: ${{ steps.backup.outputs.blocked-digest }}
+        run: |
+          INDEX=$(docker buildx imagetools inspect "$IMAGE@$TARGET_DIGEST" --raw)
+          ANNOTATIONS=()
+          while IFS= read -r -d '' annotation; do
+            ANNOTATIONS+=(--annotation "$annotation")
+          done < <(jq -j --arg blocked "$BLOCKED_DIGEST" '
+            (.annotations // {}) + {"rollback.blocked-upstream": $blocked}
+            | to_entries[] | "index:\(.key)=\(.value)\u0000"
+          ' <<< "$INDEX")
+          docker buildx imagetools create --tag "$IMAGE:latest" "${ANNOTATIONS[@]}" "$IMAGE@$TARGET_DIGEST"
+          echo "::notice title=Rollback Complete::Successfully rolled back to $ROLLBACK_TO"
+          echo "Reason: $ROLLBACK_REASON"
       - name: Create rollback issue
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
-          script: "github.rest.issues.create({\n  owner: context.repo.owner,\n  repo: context.repo.repo,\n  title: `Emergency Rollback Performed - ${new Date().toISOString().split('T')[0]}`,\n  body: `## Emergency Rollback Details\n  \n  **Rollback Target:** \\`${{ github.event.inputs.rollback_to }}\\`\n  **Reason:** ${{ github.event.inputs.reason }}\n  **Performed By:** @${{ github.actor }}\n  **Date:** ${new Date().toISOString()}\n  \n  ## Actions Taken\n  - ✅ Current \\`latest\\` backed up as \\`pre-rollback-backup\\`\n  - ✅ Rolled back \\`latest\\` to \\`${{ github.event.inputs.rollback_to }}\\`\n  \n  ## Next Steps\n  - [ ] Investigate the issue that caused the rollback\n  - [ ] Fix the underlying problem\n  - [ ] Test the fix thoroughly\n  - [ ] Deploy the fix and close this issue\n  \n  ## Available Backup Tags\n  - \\`pre-rollback-backup\\` - Version that was rolled back from\n  - \\`v<version>\\` - Version-specific tags\n  `,\n  labels: ['rollback', 'urgent']\n})\n"
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Emergency Rollback Performed - ${new Date().toISOString().split('T')[0]}`,
+              body: [
+                '## Emergency Rollback',
+                `Target: ${process.env.ROLLBACK_TO}`,
+                `Reason: ${process.env.ROLLBACK_REASON}`,
+                `Performed by: @${context.actor}`,
+                '',
+                'Previous latest saved as pre-rollback-backup.',
+                'Both AMD64 and ARM64 were preserved.',
+                '',
+                '- [ ] Investigate the failure and test a fix.',
+                '- [ ] Close this issue after recovery.'
+              ].join('\n'),
+              labels: ['rollback', 'urgent']
+            });

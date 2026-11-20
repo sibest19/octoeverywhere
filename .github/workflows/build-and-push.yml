@@ -5,6 +5,12 @@ on:
   schedule:
     - cron: '0 6 * * *'
   workflow_dispatch:
+permissions: {}
+concurrency:
+  group: octoeverywhere-release
+  cancel-in-progress: false
+  queue: max
+
 jobs:
   check-upstream:
     runs-on: ubuntu-latest
@@ -12,8 +18,8 @@ jobs:
       should-build: ${{ steps.check.outputs.should-build }}
       upstream-digest: ${{ steps.check.outputs.upstream-digest }}
       upstream-tag: ${{ steps.check.outputs.upstream-tag }}
-      upstream-entrypoint: ${{ steps.check.outputs.upstream-entrypoint }}
-      upstream-cmd: ${{ steps.check.outputs.upstream-cmd }}
+      upstream-config: ${{ steps.check.outputs.upstream-config }}
+      upstream-config-hash: ${{ steps.check.outputs.upstream-config-hash }}
       significant-change: ${{ steps.check.outputs.significant-change }}
     steps:
       - name: Check upstream image updates
@@ -22,68 +28,80 @@ jobs:
           # Pull the upstream image to inspect it
           docker pull octoeverywhere/octoeverywhere:latest
 
-          # Get current upstream image digest
-          UPSTREAM_DIGEST=$(docker image inspect octoeverywhere/octoeverywhere:latest --format='{{index .RepoDigests 0}}' | cut -d'@' -f2)
-          echo "upstream-digest=$UPSTREAM_DIGEST" >> $GITHUB_OUTPUT
+          UPSTREAM_IMAGE=$(docker image inspect octoeverywhere/octoeverywhere:latest --format='{{index .RepoDigests 0}}')
 
-          # Extract upstream entrypoint and cmd
-          UPSTREAM_ENTRYPOINT=$(docker image inspect octoeverywhere/octoeverywhere:latest --format='{{json .Config.Entrypoint}}')
-          UPSTREAM_CMD=$(docker image inspect octoeverywhere/octoeverywhere:latest --format='{{json .Config.Cmd}}')
-          echo "upstream-entrypoint=$UPSTREAM_ENTRYPOINT" >> $GITHUB_OUTPUT
-          echo "upstream-cmd=$UPSTREAM_CMD" >> $GITHUB_OUTPUT
+          UPSTREAM_DIGEST=${UPSTREAM_IMAGE##*@}
+          echo "upstream-digest=$UPSTREAM_DIGEST" >> "$GITHUB_OUTPUT"
+
+          # The action's list parser can alter JSON quotes. Pass the command as a file.
+          UPSTREAM_CONFIG=$(docker image inspect "$UPSTREAM_IMAGE" --format '{{json .Config}}' \
+            | jq -c '{entrypoint: .Entrypoint, cmd: .Cmd}')
+          CONFIG_HASH=$(printf '%s' "$UPSTREAM_CONFIG" | sha256sum | cut -d' ' -f1)
+          echo "upstream-config=$UPSTREAM_CONFIG" >> "$GITHUB_OUTPUT"
+          echo "upstream-config-hash=$CONFIG_HASH" >> "$GITHUB_OUTPUT"
+
+          if ! INDEX=$(docker buildx imagetools inspect ghcr.io/${{ github.repository_owner }}/octoeverywhere:latest --raw); then
+            if [ "$GITHUB_EVENT_NAME" = schedule ]; then
+              echo "::error::Cannot read release state from GHCR; refusing scheduled publish."
+              exit 1
+            fi
+            INDEX='{}'
+          fi
+          EXISTING_DIGEST=$(jq -r '.annotations."upstream.digest" // empty' <<< "$INDEX")
+          BLOCKED_DIGEST=$(jq -r '.annotations."rollback.blocked-upstream" // empty' <<< "$INDEX")
+          if [ "$GITHUB_EVENT_NAME" = schedule ] &&
+            { [ "$BLOCKED_DIGEST" = "$UPSTREAM_DIGEST" ] || [ "$BLOCKED_DIGEST" = manual ] || [ "$EXISTING_DIGEST" = "$UPSTREAM_DIGEST" ]; }; then
+            echo "should-build=false" >> "$GITHUB_OUTPUT"
+            echo "Upstream digest is already published or held by a rollback."
+            exit 0
+          fi
+
+          EXISTING_CONFIG_HASH=$(jq -r '.annotations."upstream.config-hash" // empty' <<< "$INDEX")
+          if [ -z "$EXISTING_CONFIG_HASH" ]; then
+            # Some older releases contain malformed JSON in these annotations.
+            if LEGACY_CONFIG=$(jq -ce '
+              .annotations | {entrypoint: (."upstream.entrypoint" | fromjson), cmd: (."upstream.cmd" | fromjson)}
+            ' <<< "$INDEX" 2>/dev/null); then
+              EXISTING_CONFIG_HASH=$(printf '%s' "$LEGACY_CONFIG" | sha256sum | cut -d' ' -f1)
+            fi
+          fi
+          SIGNIFICANT_CHANGE=false
+          if [ -z "$EXISTING_CONFIG_HASH" ]; then
+            echo "::notice::No comparable upstream configuration on the previous release."
+          elif [ "$EXISTING_CONFIG_HASH" != "$CONFIG_HASH" ]; then
+            SIGNIFICANT_CHANGE=true
+            echo "::warning::Upstream entrypoint or command changed."
+          fi
+          echo "significant-change=$SIGNIFICANT_CHANGE" >> "$GITHUB_OUTPUT"
 
           # Resolve the upstream version (e.g. "5.1.1") using several methods,
           # most-authoritative-but-fragile first, each only accepted if it looks
           # like a semver. This way a single upstream change (dropping a label,
           # moving a file) degrades to the next method instead of breaking the build.
-          is_semver() { echo "$1" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?$'; }
+          is_semver() { [[ "$1" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; }
           UPSTREAM_TAG=""
 
           # Method 1 (legacy): the org.opencontainers.image.version label, if set.
-          CANDIDATE=$(docker image inspect octoeverywhere/octoeverywhere:latest --format='{{index .Config.Labels "org.opencontainers.image.version"}}' 2>/dev/null || true)
+          CANDIDATE=$(docker image inspect "$UPSTREAM_IMAGE" --format='{{index .Config.Labels "org.opencontainers.image.version"}}' 2>/dev/null || true)
           if is_semver "$CANDIDATE"; then UPSTREAM_TAG="$CANDIDATE"; echo "Version from image label: $UPSTREAM_TAG"; fi
 
           # Method 2: pyproject.toml baked into the image (REPO_DIR=/app/octoeverywhere).
           # Upstream COPYs the whole repo in, so this tracks exactly what :latest contains.
           if [ -z "$UPSTREAM_TAG" ]; then
-            CANDIDATE=$(docker run --rm --entrypoint cat octoeverywhere/octoeverywhere:latest /app/octoeverywhere/pyproject.toml 2>/dev/null \
-              | grep -E '^version[[:space:]]*=' | head -1 | sed -E 's/.*=[[:space:]]*"([^"]+)".*/\1/')
+            CANDIDATE=$(docker run --rm --entrypoint cat "$UPSTREAM_IMAGE" /app/octoeverywhere/pyproject.toml 2>/dev/null \
+              | grep -m1 -E '^version[[:space:]]*=' | sed -E 's/.*=[[:space:]]*"([^"]+)".*/\1/' || true)
             if is_semver "$CANDIDATE"; then UPSTREAM_TAG="$CANDIDATE"; echo "Version from pyproject.toml: $UPSTREAM_TAG"; fi
           fi
 
-          # No semver found by any method: leave it as "latest" so the downstream
-          # metadata step produces an empty tag list and the build fails loudly
-          # (and notifies via Telegram). We intentionally never publish an
-          # unversioned image — every release must carry a real semver.
-          if [ -z "$UPSTREAM_TAG" ]; then UPSTREAM_TAG="latest"; echo "::warning::Could not resolve a semver version upstream; the build will fail rather than publish an unversioned image."; fi
+          if [ -z "$UPSTREAM_TAG" ]; then
+            echo "::error::Could not resolve an upstream semver; refusing to publish."
+            exit 1
+          fi
 
           echo "Resolved upstream version: $UPSTREAM_TAG"
-          echo "upstream-tag=$UPSTREAM_TAG" >> $GITHUB_OUTPUT
+          echo "upstream-tag=$UPSTREAM_TAG" >> "$GITHUB_OUTPUT"
 
-          # Read back what we last published, from the index annotations on our :latest
-          EXISTING_DIGEST=$(docker manifest inspect ghcr.io/${{ github.repository_owner }}/octoeverywhere:latest 2>/dev/null | jq -r '.annotations."upstream.digest" // empty' || echo "")
-          EXISTING_ENTRYPOINT=$(docker manifest inspect ghcr.io/${{ github.repository_owner }}/octoeverywhere:latest 2>/dev/null | jq -r '.annotations."upstream.entrypoint" // empty' || echo "")
-          EXISTING_CMD=$(docker manifest inspect ghcr.io/${{ github.repository_owner }}/octoeverywhere:latest 2>/dev/null | jq -r '.annotations."upstream.cmd" // empty' || echo "")
-
-          # Check for significant changes that might break our wrapper
-          SIGNIFICANT_CHANGE="false"
-          if [ -n "$EXISTING_ENTRYPOINT" ] && { [ "$UPSTREAM_ENTRYPOINT" != "$EXISTING_ENTRYPOINT" ] || [ "$UPSTREAM_CMD" != "$EXISTING_CMD" ]; }; then
-            echo "⚠️ SIGNIFICANT CHANGE DETECTED ⚠️"
-            echo "Entrypoint changed: $EXISTING_ENTRYPOINT -> $UPSTREAM_ENTRYPOINT"
-            echo "Command changed: $EXISTING_CMD -> $UPSTREAM_CMD"
-            SIGNIFICANT_CHANGE="true"
-          fi
-          echo "significant-change=$SIGNIFICANT_CHANGE" >> $GITHUB_OUTPUT
-
-          if [ "$UPSTREAM_DIGEST" != "$EXISTING_DIGEST" ] || [ "${{ github.event_name }}" = "push" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "should-build=true" >> $GITHUB_OUTPUT
-            echo "Upstream image has been updated or manual trigger detected"
-            echo "Upstream entrypoint: $UPSTREAM_ENTRYPOINT"
-            echo "Upstream cmd: $UPSTREAM_CMD"
-          else
-            echo "should-build=false" >> $GITHUB_OUTPUT
-            echo "No upstream changes detected"
-          fi
+          echo "should-build=true" >> "$GITHUB_OUTPUT"
 
   # Single job on a single runner: nothing is pushed to the registry until the
   # tests pass, so we never publish a usable-looking tag for a broken build.
@@ -96,16 +114,23 @@ jobs:
       packages: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Write upstream configuration
+        env:
+          UPSTREAM_CONFIG: ${{ needs.check-upstream.outputs.upstream-config }}
+        run: printf '%s\n' "$UPSTREAM_CONFIG" | jq -ce 'select(type == "object")' > upstream_config.json
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v4
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -113,15 +138,14 @@ jobs:
 
       # Build amd64 locally and load it — NOT pushed. This is the artifact we test.
       - name: Build test image (amd64, local)
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           load: true
           platforms: linux/amd64
           tags: octoeverywhere:test
           build-args: |
-            UPSTREAM_ENTRYPOINT=${{ needs.check-upstream.outputs.upstream-entrypoint }}
-            UPSTREAM_CMD=${{ needs.check-upstream.outputs.upstream-cmd }}
+            UPSTREAM_IMAGE=octoeverywhere/octoeverywhere@${{ needs.check-upstream.outputs.upstream-digest }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -129,16 +153,10 @@ jobs:
         run: |
           ./test-wrapper.sh octoeverywhere:test
 
-      # Generate the cascading semver tags from the upstream version (resolved in
-      # check-upstream). 5.1.1 -> :5.1.1, :5.1, :5. flavor: latest=true promotes
-      # the resolved semver to also carry :latest, so every publish is consistently
-      # semver-driven. If the version is ever not a valid semver (all resolution
-      # methods failed), the semver tags are skipped, the tag list is empty, and
-      # the push fails — intentional: we only ever publish semver-versioned images
-      # rather than an unversioned :latest. The failure is surfaced via Telegram.
+      # Publish cascading version tags only after the pinned image passes tests.
       - name: Compute release tags
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
           images: ghcr.io/${{ github.repository_owner }}/octoeverywhere
           flavor: |
@@ -151,7 +169,7 @@ jobs:
       # Tests passed: build multi-arch and push straight to the release tags.
       # No candidate/intermediate tags are ever created.
       - name: Build and push release tags (multi-arch)
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           push: true
@@ -162,15 +180,11 @@ jobs:
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           build-args: |
-            UPSTREAM_ENTRYPOINT=${{ needs.check-upstream.outputs.upstream-entrypoint }}
-            UPSTREAM_CMD=${{ needs.check-upstream.outputs.upstream-cmd }}
-          # Annotations are written on the image index so check-upstream can read
-          # them back via `docker manifest inspect` on the next run.
+            UPSTREAM_IMAGE=octoeverywhere/octoeverywhere@${{ needs.check-upstream.outputs.upstream-digest }}
           annotations: |
             index:upstream.digest=${{ needs.check-upstream.outputs.upstream-digest }}
+            index:upstream.config-hash=${{ needs.check-upstream.outputs.upstream-config-hash }}
             index:upstream.tag=${{ needs.check-upstream.outputs.upstream-tag }}
-            index:upstream.entrypoint=${{ needs.check-upstream.outputs.upstream-entrypoint }}
-            index:upstream.cmd=${{ needs.check-upstream.outputs.upstream-cmd }}
             index:build.run=${{ github.run_id }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -192,7 +206,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ vars.TELEGRAM_CHAT_ID }}
   notify-failure:
     needs: [check-upstream, build-test-publish]
-    if: failure() && needs.check-upstream.outputs.should-build == 'true'
+    if: failure()
     runs-on: ubuntu-latest
     steps:
       - name: Notify build failure via Telegram
