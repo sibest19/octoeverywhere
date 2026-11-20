@@ -76,14 +76,24 @@ docker run -d \
 
 ## How It Works
 
-1. **Build time**: Extracts the official image's startup command
+1. **CI build**: Extracts the official image's startup command from the selected upstream digest
 2. **Runtime**: Creates a user with your PUID/PGID, fixes `/data` ownership, then runs the original command as that user
 
 The wrapper starts as root to prepare permissions, then replaces itself with the upstream process running as the requested user. This is separate from Docker’s rootless daemon mode.
 
-`PUID` and `PGID` must be decimal integers without leading zeros (defaults: `1001` and `0`). `PUID` must be nonzero so the application runs without root privileges. Startup stops if user creation or `/data` ownership changes fail, including on read-only or root-squashed mounts.
+`PUID` and `PGID` must be decimal integers without leading zeros (defaults: `1001` and `0`). `PUID` must be nonzero so the application runs without root privileges. When creating an account, the wrapper accepts a `PUID` up to `2147483647`. Startup stops if user creation or `/data` ownership changes fail, including on read-only or root-squashed mounts.
 
 Upstream `ENTRYPOINT` and `CMD` are stored as JSON so spaces, quotes, and empty arguments survive unchanged. Arguments passed to `docker run` replace the upstream `CMD`. CI builds from the exact upstream digest it inspected.
+
+A local `docker build` uses the checked-in `upstream_config.json`. If you override `UPSTREAM_IMAGE`, regenerate that file from the same digest before building:
+
+```bash
+base='octoeverywhere/octoeverywhere@sha256:<digest>'
+docker pull "$base" &&
+  docker image inspect "$base" --format '{{json .Config}}' |
+  jq -ce '{entrypoint: .Entrypoint, cmd: .Cmd}' > upstream_config.json &&
+  docker build --build-arg UPSTREAM_IMAGE="$base" .
+```
 
 ## Automated Builds
 
@@ -118,7 +128,7 @@ docker pull ghcr.io/sibest19/octoeverywhere:5.0.1
 ```
 
 **Option 2: Automated rollback**
-Go to Actions → Emergency Rollback → Run workflow, then select the target version. The workflow requires both AMD64 and ARM64 in the target image and preserves the complete image index in both the backup and `latest` tags.
+Go to Actions → Emergency Rollback → Run workflow, then select the target version. The target must be an OCI image index with AMD64 and ARM64. The workflow backs up the current `latest` and promotes the target with its platforms and release annotations intact, updating the rollback hold.
 
 Scheduled builds skip the withdrawn upstream digest and resume when upstream publishes a different digest. A push to `main` or a manual build overrides the hold. If the withdrawn image has no upstream digest recorded, scheduled publishing stays paused until an explicit build.
 

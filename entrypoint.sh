@@ -27,6 +27,10 @@ if ! getent group "$PGID" >/dev/null 2>&1; then
 fi
 
 if ! getent passwd "$PUID" >/dev/null 2>&1; then
+  if [ "$PUID" -gt 2147483647 ]; then
+    echo "[ERROR] PUID must be at most 2147483647 when creating a user" >&2
+    exit 1
+  fi
   adduser -D -H -u "$PUID" -G "$(getent group "$PGID" | cut -d: -f1)" appuser
 fi
 

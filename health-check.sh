@@ -81,7 +81,7 @@ check_basic_functionality() {
 check_upstream_changes() {
   echo "Checking for significant upstream changes..."
 
-  local upstream_entrypoint upstream_cmd wrapper_config
+  local upstream_config wrapper_config matches
   wrapper_config=$(docker run --rm --entrypoint sh "$IMAGE" -ec '
     if [ -f /upstream_config.json ]; then
       cat /upstream_config.json
@@ -95,11 +95,14 @@ check_upstream_changes() {
   fi
 
   docker pull octoeverywhere/octoeverywhere:latest >/dev/null 2>&1 || return 1
-  upstream_entrypoint=$(docker image inspect octoeverywhere/octoeverywhere:latest --format='{{json .Config.Entrypoint}}') || return 1
-  upstream_cmd=$(docker image inspect octoeverywhere/octoeverywhere:latest --format='{{json .Config.Cmd}}') || return 1
+  upstream_config=$(docker image inspect octoeverywhere/octoeverywhere:latest --format='{{json .Config}}') || return 1
 
-  if ! echo "$wrapper_config" | jq -e --argjson entrypoint "$upstream_entrypoint" --argjson cmd "$upstream_cmd" \
-    '.entrypoint == $entrypoint and .cmd == $cmd' >/dev/null; then
+  if ! matches=$(jq -n --argjson wrapper "$wrapper_config" --argjson upstream "$upstream_config" \
+    '$wrapper.entrypoint == $upstream.Entrypoint and $wrapper.cmd == $upstream.Cmd'); then
+    send_alert "Could not compare image configurations; check jq and the image metadata." "ERROR"
+    return 1
+  fi
+  if [ "$matches" = false ]; then
     send_alert "Image configuration differs from current upstream; this is expected after a rollback." "WARNING"
     return 0
   fi

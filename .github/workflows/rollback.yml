@@ -11,6 +11,7 @@ on:
 concurrency:
   group: octoeverywhere-release
   cancel-in-progress: false
+  queue: max
 jobs:
   rollback:
     runs-on: ubuntu-latest
@@ -35,9 +36,18 @@ jobs:
         id: target
         run: |
           DIGEST=$(docker buildx imagetools inspect "$IMAGE:$ROLLBACK_TO" --format '{{.Manifest.Digest}}')
-          docker buildx imagetools inspect "$IMAGE@$DIGEST" --raw | jq -e '
+          INDEX=$(docker buildx imagetools inspect "$IMAGE@$DIGEST" --raw)
+          if ! jq -e '.mediaType == "application/vnd.oci.image.index.v1+json"' <<< "$INDEX" >/dev/null; then
+            echo "::error::Rollback requires an OCI image index."
+            exit 1
+          fi
+          if ! jq -e '
             [.manifests[].platform | .os + "/" + .architecture] |
-            index("linux/amd64") != null and index("linux/arm64") != null'
+            index("linux/amd64") != null and index("linux/arm64") != null
+          ' <<< "$INDEX" >/dev/null; then
+            echo "::error::Rollback requires both linux/amd64 and linux/arm64."
+            exit 1
+          fi
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
       - name: Backup current latest before rollback
         id: backup
@@ -52,8 +62,15 @@ jobs:
           TARGET_DIGEST: ${{ steps.target.outputs.digest }}
           BLOCKED_DIGEST: ${{ steps.backup.outputs.blocked-digest }}
         run: |
-          docker buildx imagetools create --tag "$IMAGE:latest" \
-            --annotation "index:rollback.blocked-upstream=$BLOCKED_DIGEST" "$IMAGE@$TARGET_DIGEST"
+          INDEX=$(docker buildx imagetools inspect "$IMAGE@$TARGET_DIGEST" --raw)
+          ANNOTATIONS=()
+          while IFS= read -r -d '' annotation; do
+            ANNOTATIONS+=(--annotation "$annotation")
+          done < <(jq -j --arg blocked "$BLOCKED_DIGEST" '
+            (.annotations // {}) + {"rollback.blocked-upstream": $blocked}
+            | to_entries[] | "index:\(.key)=\(.value)\u0000"
+          ' <<< "$INDEX")
+          docker buildx imagetools create --tag "$IMAGE:latest" "${ANNOTATIONS[@]}" "$IMAGE@$TARGET_DIGEST"
           echo "::notice title=Rollback Complete::Successfully rolled back to $ROLLBACK_TO"
           echo "Reason: $ROLLBACK_REASON"
       - name: Create rollback issue

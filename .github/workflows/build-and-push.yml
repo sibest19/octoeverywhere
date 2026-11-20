@@ -9,6 +9,7 @@ permissions: {}
 concurrency:
   group: octoeverywhere-release
   cancel-in-progress: false
+  queue: max
 
 jobs:
   check-upstream:
@@ -56,8 +57,18 @@ jobs:
           fi
 
           EXISTING_CONFIG_HASH=$(jq -r '.annotations."upstream.config-hash" // empty' <<< "$INDEX")
+          if [ -z "$EXISTING_CONFIG_HASH" ]; then
+            # Some older releases contain malformed JSON in these annotations.
+            if LEGACY_CONFIG=$(jq -ce '
+              .annotations | {entrypoint: (."upstream.entrypoint" | fromjson), cmd: (."upstream.cmd" | fromjson)}
+            ' <<< "$INDEX" 2>/dev/null); then
+              EXISTING_CONFIG_HASH=$(printf '%s' "$LEGACY_CONFIG" | sha256sum | cut -d' ' -f1)
+            fi
+          fi
           SIGNIFICANT_CHANGE=false
-          if [ -n "$EXISTING_CONFIG_HASH" ] && [ "$EXISTING_CONFIG_HASH" != "$CONFIG_HASH" ]; then
+          if [ -z "$EXISTING_CONFIG_HASH" ]; then
+            echo "::notice::No comparable upstream configuration on the previous release."
+          elif [ "$EXISTING_CONFIG_HASH" != "$CONFIG_HASH" ]; then
             SIGNIFICANT_CHANGE=true
             echo "::warning::Upstream entrypoint or command changed."
           fi
@@ -67,7 +78,7 @@ jobs:
           # most-authoritative-but-fragile first, each only accepted if it looks
           # like a semver. This way a single upstream change (dropping a label,
           # moving a file) degrades to the next method instead of breaking the build.
-          is_semver() { echo "$1" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; }
+          is_semver() { [[ "$1" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; }
           UPSTREAM_TAG=""
 
           # Method 1 (legacy): the org.opencontainers.image.version label, if set.

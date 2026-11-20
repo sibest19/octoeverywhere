@@ -73,6 +73,7 @@ for variable in PUID PGID; do
 done
 
 expect_failure '[ERROR] PUID must be nonzero' --tmpfs /data -e PUID=0
+expect_failure '[ERROR] PUID must be at most 2147483647 when creating a user' --tmpfs /data -e PUID=2147483648
 
 mkdir "$TEST_DIR/read-only"
 expect_failure '[ERROR] Cannot set /data ownership' \
